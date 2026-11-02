@@ -1,0 +1,4 @@
+# Optional standalone real-corpus export and acceptance test. Notebook users
+# can use the existing research environment instead of installing this again.
+-r requirements-test.txt
+perch-hoplite==1.0.2

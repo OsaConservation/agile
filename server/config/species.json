@@ -1,0 +1,262 @@
+[
+  {
+    "id": "AGAANN",
+    "scientificName": "Agalychnis annae",
+    "commonName": "Blue-sided treefrog"
+  },
+  {
+    "id": "AGACAL",
+    "scientificName": "Agalychnis callidryas",
+    "commonName": "Red-eyed treefrog"
+  },
+  {
+    "id": "AGASPU",
+    "scientificName": "Agalychnis spurrelli",
+    "commonName": "Orange-sided gliding leaf frog"
+  },
+  {
+    "id": "ALLTAL",
+    "scientificName": "Allobates talamancae",
+    "commonName": "Talamanca rocket frog"
+  },
+  {
+    "id": "ATEVAR",
+    "scientificName": "Atelopus varius",
+    "commonName": "Variable harlequin toad"
+  },
+  {
+    "id": "BOAROS",
+    "scientificName": "Boana rosenbergi",
+    "commonName": "Rosenberg's treefrog"
+  },
+  {
+    "id": "COCGRA",
+    "scientificName": "Cochranella granulosa",
+    "commonName": "Grainy cochran frog"
+  },
+  {
+    "id": "CRACRA",
+    "scientificName": "Craugastor crassidigitus",
+    "commonName": "Isla Bonita robber frog"
+  },
+  {
+    "id": "CRAFIT",
+    "scientificName": "Craugastor fitzingeri",
+    "commonName": "Fitzinger's robber frog"
+  },
+  {
+    "id": "CRARUG",
+    "scientificName": "Craugastor rugosus",
+    "commonName": "Veragua robber frog"
+  },
+  {
+    "id": "CRASTE",
+    "scientificName": "Craugastor stejnegerianus",
+    "commonName": "Stejneger's robber frog"
+  },
+  {
+    "id": "CRATAU",
+    "scientificName": "Craugastor taurus",
+    "commonName": "South Pacific streamside frog"
+  },
+  {
+    "id": "CTEATE",
+    "scientificName": "Ctenophryne aterrima",
+    "commonName": "Costa Rica nelson frog"
+  },
+  {
+    "id": "DENAUR",
+    "scientificName": "Dendrobates auratus",
+    "commonName": "Green and black poison dart frog"
+  },
+  {
+    "id": "DENEBR",
+    "scientificName": "Dendropsophus ebraccatus",
+    "commonName": "Hourglass treefrog"
+  },
+  {
+    "id": "DENMIC",
+    "scientificName": "Dendropsophus microcephalus",
+    "commonName": "Small-headed treefrog"
+  },
+  {
+    "id": "DIADIA",
+    "scientificName": "Diasporus diastema",
+    "commonName": "Common dink frog"
+  },
+  {
+    "id": "DIAVOC",
+    "scientificName": "Diasporus vocator",
+    "commonName": "Vocal dink frog"
+  },
+  {
+    "id": "ELAPEA",
+    "scientificName": "Elachistocleis pearsei",
+    "commonName": "Colombian plump frog"
+  },
+  {
+    "id": "ENGPUS",
+    "scientificName": "Engystomops pustulosus",
+    "commonName": "T\u00fangara frog"
+  },
+  {
+    "id": "ESPPRO",
+    "scientificName": "Espadarana prosoblepon",
+    "commonName": "Emerald glass frog"
+  },
+  {
+    "id": "HYACOL",
+    "scientificName": "Hyalinobatrachium colymbiphyllum",
+    "commonName": "Plantation glass frog"
+  },
+  {
+    "id": "HYAFLE",
+    "scientificName": "Hyalinobatrachium fleischmanni",
+    "commonName": "Fleischmann\u2019s glass frog"
+  },
+  {
+    "id": "HYAVAL",
+    "scientificName": "Hyalinobatrachium valerioi",
+    "commonName": "La Palma glass frog"
+  },
+  {
+    "id": "INCAUC",
+    "scientificName": "Incilius aucoinae",
+    "commonName": "Pacific forest toad"
+  },
+  {
+    "id": "INCCON",
+    "scientificName": "Incilius coniferus",
+    "commonName": "Evergreen toad"
+  },
+  {
+    "id": "INCMEL",
+    "scientificName": "Incilius melanochlorus",
+    "commonName": "Dark green toad"
+  },
+  {
+    "id": "LEPBOL",
+    "scientificName": "Leptodactylus bolivianus",
+    "commonName": "Bolivian white-lipped frog"
+  },
+  {
+    "id": "LEPFRA",
+    "scientificName": "Leptodactylus fragilis",
+    "commonName": "American white-lipped frog"
+  },
+  {
+    "id": "LEPINS",
+    "scientificName": "Leptodactylus insularum",
+    "commonName": "San Miguel island frog"
+  },
+  {
+    "id": "LEPMEL",
+    "scientificName": "Leptodactylus melanonotus",
+    "commonName": "Sabinal frog"
+  },
+  {
+    "id": "LEPPOE",
+    "scientificName": "Leptodactylus poecilochilus",
+    "commonName": "Brown Foam-nest frog"
+  },
+  {
+    "id": "LEPSAV",
+    "scientificName": "Leptodactylus savagei",
+    "commonName": "Central American Bullfrog, Smoky Jungle frog"
+  },
+  {
+    "id": "LITWAR",
+    "scientificName": "Lithobates warszewitschii",
+    "commonName": "Brilliant Forest frog"
+  },
+  {
+    "id": "OOPGRA",
+    "scientificName": "Oophaga granulifera",
+    "commonName": "Granular poison dart frog"
+  },
+  {
+    "id": "PHYVIT",
+    "scientificName": "Phyllobates vittatus",
+    "commonName": "Golfo Dulce poison dart frog"
+  },
+  {
+    "id": "PRICRU",
+    "scientificName": "Pristimantis cruentus",
+    "commonName": "Chiriqui robber frog"
+  },
+  {
+    "id": "PRIPAR",
+    "scientificName": "Pristimantis pardalis",
+    "commonName": "Leopard robber frog"
+  },
+  {
+    "id": "PRIRID",
+    "scientificName": "Pristimantis ridens",
+    "commonName": "Rio San Juan robber frog"
+  },
+  {
+    "id": "RHAHAE",
+    "scientificName": "Rhaebo haematiticus",
+    "commonName": "Truando toad"
+  },
+  {
+    "id": "RHIHOR",
+    "scientificName": "Rhinella horribilis",
+    "commonName": "Cane toad"
+  },
+  {
+    "id": "SACALB",
+    "scientificName": "Sachatamia albomaculata",
+    "commonName": "White-spotted Cochran frog"
+  },
+  {
+    "id": "SCIBOU",
+    "scientificName": "Scinax boulengeri",
+    "commonName": "Boulenger\u2019s snouted treefrog"
+  },
+  {
+    "id": "SCIELA",
+    "scientificName": "Scinax elaeochroa",
+    "commonName": "Sipurio snouted treefrog"
+  },
+  {
+    "id": "SILFLO",
+    "scientificName": "Silverstoneia flotator",
+    "commonName": "Rainforest rocket frog"
+  },
+  {
+    "id": "SMIBAU",
+    "scientificName": "Smilisca baudinii",
+    "commonName": "Common Mexican treefrog"
+  },
+  {
+    "id": "SMIPHA",
+    "scientificName": "Smilisca phaeota",
+    "commonName": "New Granada cross-banded treefrog"
+  },
+  {
+    "id": "SMISIL",
+    "scientificName": "Smilisca sila",
+    "commonName": "Panama cross-banded treefrog"
+  },
+  {
+    "id": "SMISOR",
+    "scientificName": "Smilisca sordida",
+    "commonName": "Veragua cross-banded treefrog"
+  },
+  {
+    "id": "TERPUL",
+    "scientificName": "Teratohyla pulverata",
+    "commonName": "Chiriqui glass frog"
+  },
+  {
+    "id": "TRATYP",
+    "scientificName": "Trachycephalus typhonius",
+    "commonName": "Milk frog"
+  },
+  {
+    "id": "TRISPI",
+    "scientificName": "Triprion spinosus",
+    "commonName": "Spiny-headed  treefrog"
+  }
+]
