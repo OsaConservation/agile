@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath
 import wave
 
 from .models import CandidateBundle, Species
+from .references import ReferenceCatalog
 from .repository import AppError, Repository
 
 
@@ -12,6 +13,7 @@ class AnnotationService:
     def __init__(self, repository: Repository, settings):
         self.repository = repository
         self.settings = settings
+        self.references = ReferenceCatalog(settings.local_dir / 'references')
         species = [
             Species.model_validate(s)
             for s in json.loads(settings.species_file.read_text(encoding='utf8'))
@@ -54,6 +56,16 @@ class AnnotationService:
 
     def get_recording_audio(self, recording_id):
         return self.recording_path(self.repository.get_recording(recording_id))
+
+    def get_window_spectrogram(self, window_id):
+        relative = self.repository.get_window(window_id)['spectrogram_path']
+        if not relative:
+            raise AppError(404, 'Window spectrogram unavailable')
+        root = (self.settings.local_dir / 'spectrograms').resolve()
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise AppError(404, 'Window spectrogram unavailable')
+        return path
 
     def import_bundle(self, manifest_path):
         """Validate source recording availability and bounds, then import metadata."""

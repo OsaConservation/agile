@@ -89,17 +89,19 @@ source files are not hashed or copied.
 ## HTTP contract and playback
 
 Public JSON uses camelCase. Species codes/display names come from
-`config/species.json`; reference clip lists are currently empty.
+`config/species.json`. Optional reference fixtures are imported from the frontend
+catalog and served by this server. Species without examples return empty clip lists.
 
 | Request | Result |
 |---|---|
-| `GET /health` | Readiness and database schema version 5 |
+| `GET /health` | Readiness and database schema version 6 |
 | `GET /api/species` | Canonical species and display names |
 | `GET /api/species/{id}/references` | Target and comparison species with `clips` |
 | `GET /api/species/{id}/candidates` | `{batchId, clips}` with up to 15 unreviewed windows |
 | `POST /api/annotations` | Atomic `{submissionId, savedCount}` acknowledgement |
 | `GET /api/submissions/{id}` | Original acknowledgement, or 404 |
 | `GET /media/recordings/{id}` | Original full WAV, supporting HTTP byte ranges |
+| `GET /media/windows/{id}/spectrogram` | Exact-window WebP image, or 404 if unavailable |
 
 Candidate clips include `id`, source `recordingId`, `offsets`, `uri`, `datasetName`,
 `audioUrl`, `startSeconds`, `endSeconds`, and `numAnnotations`. `audioUrl` identifies
@@ -129,8 +131,10 @@ with the same ID. Correction to unsure supersedes the earlier binary answer.
 
 ## Storage and tests
 
-The rewritten `app/migrations/001_initial.sql` creates database version 5. Older
-versions are rejected without resetting them. Back up old stores with SQLite's
+The initial schema plus `002_spectrograms.sql` creates database version 6.
+Existing version 5 stores migrate additively on startup, preserving all rows.
+The migration adds nullable `windows.spectrogram_path`, relative to
+`local/spectrograms`. Older versions are rejected without resetting them. Back up old stores with SQLite's
 backup API before rebuilding from bundles. Do not copy only the main file while
 WAL writers run. Existing real annotations need explicit conversion, not deletion.
 Generated databases, backups, bundles and caches are ignored by git.
@@ -149,3 +153,42 @@ recording range responses; synthetic labels stay in temporary stores.
 Next: connect frontend fetches, then export versioned annotation snapshots with
 checked source window joins to Hoplite embeddings. SQLite tests do not establish
 BigQuery transaction, latency or cost behavior.
+
+## Local reference fixtures
+
+Import the frontend catalog's displayed species audio and spectrograms once:
+
+```powershell
+.venv/Scripts/python.exe -m server.tools.import_references C:/OsaAnurans
+```
+
+This copies listed assets into `server/local/references` and matches the catalog's
+explicit species codes against the server configuration. It never changes the
+frontend checkout or adds references to the candidate queue. Restart the server
+after import. Existing output is preserved; use `--output` for a fresh snapshot.
+Only manifest-listed assets are served at `/media/references/{asset_id}`.
+
+## Candidate window spectrograms
+
+Reference images describe reference calls and must not be reused as candidate
+window images. Generate each candidate image from its own recording offsets:
+
+```powershell
+.venv/Scripts/python.exe -m server.tools.generate_spectrograms
+```
+
+Alternatively, add `--generate-spectrograms` to the candidate import command.
+This optional step requires the research environment (matplotlib, soundfile,
+NumPy and Pillow/WebP support), not just the minimal HTTP server environment.
+Images are generated once per window, shared across species, and existing files
+are skipped. Missing files are regenerated. Images publish atomically before SQL
+paths are saved; failures can be retried. Candidate imports commit separately,
+so a rendering failure leaves valid candidates with a null image URL until retry.
+Candidate JSON exposes `spectrogramUrl`, never a filesystem path; clients should
+handle null while images are pending. The image endpoint serves only registered
+window paths inside the configured spectrogram directory. Restart a running
+server after installing these code changes.
+
+References retain their full duration (no window playback bounds). The local
+fixture assets and manifest are ignored by git. They are for local testing;
+verify the original media usage rights before publishing them.

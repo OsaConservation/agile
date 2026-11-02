@@ -73,7 +73,7 @@ def create_app(settings=None, repository=None):
     @app.get('/health')
     def health():
         repository.health()
-        return {'status': 'ok', 'storage': 'sqlite', 'schemaVersion': 5}
+        return {'status': 'ok', 'storage': 'sqlite', 'schemaVersion': 6}
 
     @app.get('/api/species', response_model=list[Species])
     def species(request: Request):
@@ -82,29 +82,44 @@ def create_app(settings=None, repository=None):
     @app.get('/api/species/{species_id}/references', response_model=References)
     def references(species_id: str, request: Request):
         service = request.app.state.service
-        target = service.require_species(species_id)
+        service.require_species(species_id)
+
+        def reference(species):
+            return species.model_dump() | {
+                'clips': service.references.clips(species.id, request)
+            }
+
         return {
-            'target': target.model_dump() | {'clips': []},
-            'comparisons': [
-                s.model_dump() | {'clips': []}
-                for s in service.species.values()
-                if s.id != species_id
-            ],
+            'target': reference(service.species[species_id]),
+            'comparisons': [reference(s) for s in service.species.values() if s.id != species_id],
         }
+
+    @app.get('/media/references/{asset_id}', name='reference_asset')
+    def reference_asset(asset_id: str, request: Request):
+        return FileResponse(request.app.state.service.references.asset_path(asset_id))
 
     @app.get('/api/species/{species_id}/candidates', response_model=BatchResponse)
     def candidates(species_id: str, request: Request):
         batch = request.app.state.service.get_batch(species_id)
         # Each window uses its full recording URL with explicit playback bounds.
-        return {
-            'batchId': batch['batchId'],
-            'clips': [
-                {k: v for k, v in r.items() if k != 'mediaRecordingId'}
-                | {'audioUrl': str(request.url_for('recording_audio', recording_id=r['mediaRecordingId'])),
-                   'startSeconds': r['offsets'][0], 'endSeconds': r['offsets'][1]}
-                for r in batch['clips']
-            ],
-        }
+        clips = []
+        for row in batch['clips']:
+            clip = {
+                key: value for key, value in row.items()
+                if key not in ('mediaRecordingId', 'spectrogramPath')
+            }
+            clip.update(
+                audioUrl=str(request.url_for('recording_audio', recording_id=row['mediaRecordingId'])),
+                spectrogramUrl=(
+                    str(request.url_for('window_spectrogram', window_id=row['id']))
+                    if row['spectrogramPath'] else None
+                ),
+                startSeconds=row['offsets'][0],
+                endSeconds=row['offsets'][1],
+            )
+            clips.append(clip)
+
+        return {'batchId': batch['batchId'], 'clips': clips}
 
     @app.post('/api/annotations', response_model=Acknowledgement)
     def annotations(submission: Submission, request: Request):
@@ -118,5 +133,9 @@ def create_app(settings=None, repository=None):
     def recording_audio(recording_id: str, request: Request):
         path = request.app.state.service.get_recording_audio(recording_id)
         return FileResponse(path, media_type='audio/wav')
+
+    @app.get('/media/windows/{window_id}/spectrogram', name='window_spectrogram')
+    def window_spectrogram(window_id: str, request: Request):
+        return FileResponse(request.app.state.service.get_window_spectrogram(window_id), media_type='image/webp')
 
     return app

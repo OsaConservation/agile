@@ -180,6 +180,7 @@ class Window(Model):
     source_window_id: int
     start_seconds: Annotated[float, Field(ge=0)]
     end_seconds: float
+    spectrogram_path: str | None = None
 
     @model_validator(mode='after')
     def valid_interval(self):

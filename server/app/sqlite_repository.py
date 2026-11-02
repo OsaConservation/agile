@@ -67,11 +67,17 @@ class SQLiteRepository:
                         statement = ''
                 if statement.strip():
                     raise RuntimeError('Incomplete schema statement')
-            elif version != 5:
+            elif version not in (5, 6):
                 raise RuntimeError(
                     f'Unsupported database schema version {version}. '
                     'The four-table schema requires a fresh store; back up the old store first.'
                 )
+            if version in (0, 5):
+                # Add derived media metadata without rebuilding source/answer rows.
+                migration = (Path(__file__).parent / 'migrations/002_spectrograms.sql').read_text()
+                for statement in migration.split(';'):
+                    if statement.strip():
+                        conn.execute(statement)
             conn.commit()
         finally:
             conn.close()
@@ -91,9 +97,21 @@ class SQLiteRepository:
                     recording_id, candidate.recordingId, candidate.uri, candidate.datasetName,
                 )
                 self._insert_source(conn, 'recordings', recording)
-                self._insert_source(conn, 'windows', (
-                    window_id, recording_id, candidate.sourceWindowId, *candidate.offsets,
-                ))
+                # Derived images are not part of immutable source identity.
+                values = (window_id, recording_id, candidate.sourceWindowId, *candidate.offsets)
+                previous = conn.execute(
+                    'SELECT id,recording_id,source_window_id,start_seconds,end_seconds FROM windows WHERE id=?',
+                    (window_id,),
+                ).fetchone()
+                if previous and tuple(previous) != values:
+                    raise AppError(409, f'Conflicting source identity: {window_id}')
+                if not previous:
+                    conn.execute(
+                        '''INSERT INTO windows(
+                            id,recording_id,source_window_id,start_seconds,end_seconds
+                        ) VALUES(?,?,?,?,?)''',
+                        values,
+                    )
                 cursor = conn.execute(
                     'INSERT INTO candidates VALUES(?,?,?) ON CONFLICT(window_id,species) DO NOTHING',
                     (digest([window_id, bundle.speciesId]), window_id, bundle.speciesId),
@@ -150,7 +168,7 @@ class SQLiteRepository:
             return {
                 'batchId': self._batch_id(species, annotator),
                 'clips': [dict(id=row['id'], **self._metadata(row), mediaRecordingId=row['recording_id'],
-                               numAnnotations=row['num_annotations'])
+                               spectrogramPath=row['spectrogram_path'], numAnnotations=row['num_annotations'])
                           for row in chosen],
             }
 
@@ -236,3 +254,22 @@ class SQLiteRepository:
         if not row:
             raise AppError(404, 'Unknown recording')
         return dict(row)
+
+    def get_window(self, window_id):
+        with self.connection() as conn:
+            row = conn.execute('SELECT * FROM windows WHERE id=?', (window_id,)).fetchone()
+        if not row:
+            raise AppError(404, 'Unknown window')
+        return dict(row)
+
+    def list_windows(self):
+        with self.connection() as conn:
+            return [dict(row) for row in conn.execute('SELECT * FROM windows ORDER BY id')]
+
+    def set_spectrogram(self, window_id, path):
+        with self.connection(True) as conn:
+            cursor = conn.execute(
+                'UPDATE windows SET spectrogram_path=? WHERE id=?', (path, window_id)
+            )
+            if cursor.rowcount != 1:
+                raise AppError(404, 'Unknown window')

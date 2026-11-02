@@ -256,7 +256,7 @@ class ServerTests(unittest.TestCase):
         with self.repo.connection() as conn:
             fields = {row[1] for row in conn.execute('PRAGMA table_info(windows)')}
         self.assertEqual(fields, {'id', 'recording_id', 'source_window_id',
-                                  'start_seconds', 'end_seconds'})
+                                  'start_seconds', 'end_seconds', 'spectrogram_path'})
         self.assertFalse((self.settings.local_dir/'clips').exists())
 
     def test_maximum_batch_and_new_candidates_follow_existing_windows(self):
@@ -383,7 +383,7 @@ class ServerTests(unittest.TestCase):
         repository.health()
         with repository.connection() as conn:
             self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone()[0],1)
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],5)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],6)
             self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])
 
     def test_transaction_failure_rolls_back_answers_and_retry_metadata(self):
