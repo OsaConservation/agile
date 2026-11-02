@@ -39,7 +39,6 @@ class Candidate(WindowMetadata):
     logit: float
     boundaryDistance: Annotated[float, Field(ge=0)]
     rank: Annotated[int, Field(strict=True, ge=0)]
-    clip: Identifier
     deployment: dict | None = None
 
 
@@ -53,7 +52,7 @@ class ClassifierRun(Model):
 class CandidateBundle(Model):
     """Immutable boundary-selection output, including scoring provenance."""
 
-    schemaVersion: Literal[1]
+    schemaVersion: Literal[2]
     candidateSetId: Identifier
     speciesId: Identifier
     sourceDatasetId: Annotated[str, Field(pattern=r'^[A-Za-z0-9_-]{1,100}$')]
@@ -111,7 +110,7 @@ class Answer(WindowMetadata):
 
 
 class Submission(Model):
-    """One atomic save; submissionId also identifies unchanged retries."""
+    """One atomic save of individual annotations; submissionId identifies retries."""
 
     submissionId: Identifier
     speciesId: Identifier
@@ -137,16 +136,20 @@ class AudioClip(Model):
 
     audioUrl: str
     spectrogramUrl: str | None = None
+    # Null for standalone reference audio; full recordings specify playback bounds.
+    startSeconds: float | None = None
+    endSeconds: float | None = None
 
 
 class CandidateClip(WindowMetadata, AudioClip):
     """A review clip with source metadata needed to validate an annotation."""
 
     id: str
+    numAnnotations: Annotated[int, Field(ge=0)] = 0
 
 
 class BatchResponse(Model):
-    # An empty queue has no batch ID; issued batches retain their ID after saves.
+    # Identifies a species/annotator review context, not a persisted assignment.
     batchId: str | None
     clips: list[CandidateClip]
 
@@ -158,3 +161,48 @@ class ReferenceSpecies(Species):
 class References(Model):
     target: ReferenceSpecies
     comparisons: list[ReferenceSpecies]
+
+
+class Recording(Model):
+    """Original audio file and its source recording ID/project."""
+
+    id: Identifier
+    source_recording_id: int
+    file_path: str
+    dataset_name: str
+
+
+class Window(Model):
+    """Subsection of a recording; source_window_id links back to Hoplite embeddings."""
+
+    id: Identifier
+    recording_id: Identifier
+    source_window_id: int
+    start_seconds: Annotated[float, Field(ge=0)]
+    end_seconds: float
+
+    @model_validator(mode='after')
+    def valid_interval(self):
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError('Window end must be after its start')
+        return self
+
+
+class Annotation(Model):
+    """One answer with a server UTC timestamp; the latest inserted answer is current."""
+
+    id: Identifier
+    window_id: Identifier
+    species: Identifier
+    annotator: Identifier
+    label: Literal['yes', 'no', 'unsure']
+    submission_id: Identifier
+    created_at: datetime
+
+
+class CandidateRecord(Model):
+    """A window awaiting review for a target species."""
+
+    id: Identifier
+    window_id: Identifier
+    species: Identifier

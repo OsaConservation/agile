@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Protocol
 
 from .models import CandidateBundle, Submission
@@ -12,10 +11,10 @@ class AppError(Exception):
 
 
 class Repository(Protocol):
-    """Each mutating operation is atomic; retries never duplicate events.
+    """Atomic imports and saves, individual annotation history, query-based reviews.
 
-    Issued batch membership is immutable. Labels belong to annotator/species/window,
-    independently of scoring sets. Adapters must enforce these guarantees themselves.
+    A batch ID identifies a species/annotator review context, not stored membership.
+    Labels belong to annotator/species/window independently of classifier runs.
     """
 
     def initialize(self) -> None: ...
@@ -23,7 +22,7 @@ class Repository(Protocol):
     def health(self) -> None: ...
 
     def import_candidate_set(
-        self, bundle: CandidateBundle, manifest_hash: str, clips: dict
+        self, bundle: CandidateBundle
     ) -> bool: ...
 
     def get_review_batch(self, species: str, annotator: str, size: int) -> dict: ...
@@ -32,4 +31,4 @@ class Repository(Protocol):
 
     def get_submission(self, submission_id: str, annotator: str) -> dict: ...
 
-    def get_clip(self, clip_id: str) -> Path: ...
+    def get_recording(self, recording_id: str) -> dict: ...

@@ -17,12 +17,10 @@ def export_candidates(
     db,
     weights,
     bias,
-    audio_loader,
     output_dir,
     species_id,
     source_dataset_id,
     embedding_model,
-    sample_rate=32000,
     target_score=0.0,
     count=15,
     classifier_path=None,
@@ -30,9 +28,8 @@ def export_candidates(
     candidate_set_id=None,
     classifier_run_id=None,
 ):
-    """Write selected source windows as one validated manifest and WAV directory."""
+    """Write selected source windows as a metadata-only manifest."""
     import numpy as np
-    import soundfile as sf
     from server.app.models import CandidateBundle
     from server.app.settings import Settings
 
@@ -85,7 +82,7 @@ def export_candidates(
         artifact_hash = hashlib.sha256(content).hexdigest()
 
     manifest = dict(
-        schemaVersion=1,
+        schemaVersion=2,
         candidateSetId=candidate_set_id or str(uuid.uuid4()),
         speciesId=species_id,
         sourceDatasetId=source_dataset_id,
@@ -101,7 +98,7 @@ def export_candidates(
         candidates=[],
     )
 
-    # Fail unknown mapping before loading expensive audio.
+    # Fail unknown mappings before publishing any output.
     species = json.loads(Settings().species_file.read_text(encoding='utf8'))
     if species_id not in {s['id'] for s in species}:
         raise ValueError(f'Unknown canonical species: {species_id}')
@@ -109,7 +106,6 @@ def export_candidates(
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output_dir.parent, prefix='export-') as staging:
         staging = Path(staging)
-        (staging / 'clips').mkdir()
         for rank, (window_id, logit) in enumerate(scored_windows[:count]):
             window = db.get_window(window_id)
             recording = db.get_recording(window.recording_id)
@@ -118,16 +114,6 @@ def export_candidates(
                 raise ValueError(f'Missing deployment for recording {recording.id}')
 
             start, end = map(float, window.offsets)
-            audio = np.asarray(audio_loader(recording.filename, start))
-            if (
-                audio.ndim not in (1, 2)
-                or not np.isfinite(audio).all()
-                or len(audio) != round((end - start) * sample_rate)
-            ):
-                raise ValueError(f'Audio loader did not return the complete window {window_id}')
-
-            clip = f'clips/{window_id}.wav'
-            sf.write(staging / clip, audio, sample_rate, subtype='PCM_16')
             manifest['candidates'].append(dict(
                 sourceWindowId=window_id,
                 recordingId=int(recording.id),
@@ -137,7 +123,6 @@ def export_candidates(
                 logit=logit,
                 boundaryDistance=abs(logit - target_score),
                 rank=rank,
-                clip=clip,
                 deployment=dict(
                     sourceDeploymentId=int(deployment.id),
                     name=deployment.name,
@@ -164,7 +149,6 @@ def main():
     import base64
     import numpy as np
     from ml_collections import config_dict
-    from perch_hoplite.agile import audio_loader, source_info
     from perch_hoplite.db import brutalism, score_functions, sqlite_usearch_impl
 
     parser = argparse.ArgumentParser(
@@ -200,14 +184,6 @@ def main():
         if classifier_config['model_config'] != metadata.model_config.to_dict():
             raise ValueError('Classifier embedding configuration does not match source database')
 
-        model = metadata.model_config.model_config
-        sources = source_info.AudioSources.from_config_dict(config=metadata.audio_sources)
-        loader = audio_loader.make_filepath_loader(
-            sources,
-            sample_rate_hz=model.sample_rate,
-            window_size_s=model.window_size_s,
-        )
-
         results = brutalism.threaded_brute_search(
             db, weights, args.count,
             score_fn=score_functions.get_score_fn(
@@ -220,12 +196,10 @@ def main():
             db=db,
             weights=weights,
             bias=bias,
-            audio_loader=loader,
             output_dir=args.output,
             species_id=args.species,
             source_dataset_id=args.source_dataset_id,
             embedding_model=classifier_config['model_config'],
-            sample_rate=model.sample_rate,
             target_score=args.target_score,
             count=args.count,
             classifier_path=args.classifier,

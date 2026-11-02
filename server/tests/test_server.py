@@ -21,15 +21,17 @@ from server.app.sqlite_repository import SQLiteRepository
 
 def make_bundle(root, count=3, set_id='set-one', species='DENEBR'):
     root.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(root / 'clip.wav'), 'wb') as wav:
+    audio = root.parent / 'audio/site/audio.wav'
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(audio), 'wb') as wav:
         wav.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
-        wav.writeframes(b'\0\0' * 8000)
-    manifest = dict(schemaVersion=1, candidateSetId=set_id, speciesId=species,
+        wav.writeframes(b'\0\0' * 8000 * max(count, 3))
+    manifest = dict(schemaVersion=2, candidateSetId=set_id, speciesId=species,
         sourceDatasetId='test-corpus', createdAt='2026-11-02T00:00:00Z',
         classifierRun=dict(id='run-one', artifactSha256=None, embeddingModel='fixture', trainingSnapshotId=None),
         targetScore=0.0, selectionMode='boundary', candidates=[
             dict(sourceWindowId=i+1, recordingId=10, offsets=[float(i), float(i+1)], uri='site/audio.wav', datasetName='grillos',
-                 logit=(i+1)*0.1, boundaryDistance=(i+1)*0.1, rank=i, clip='clip.wav') for i in range(count)])
+                 logit=(i+1)*0.1, boundaryDistance=(i+1)*0.1, rank=i) for i in range(count)])
     path = root / 'manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf8')
     return path, manifest
@@ -39,7 +41,7 @@ class ServerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.settings = Settings(local_dir=self.root / 'store')
+        self.settings = Settings(local_dir=self.root / 'store', audio_roots={'grillos': self.root/'audio'})
         self.repo = SQLiteRepository(self.settings.local_dir)
         self.repo.initialize()
         self.service = AnnotationService(self.repo, self.settings)
@@ -95,8 +97,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(response.headers.get('access-control-allow-origin') == origin, allowed)
         self.assertEqual(self.client.get('/api/species/UNKNOWN/candidates').status_code, 404)
         self.assertEqual(self.client.get('/api/species/BOAROS/candidates').json(), {'batchId':None, 'clips':[]})
-        self.assertEqual(self.client.get('/media/clips/missing').status_code, 404)
-        self.assertEqual(self.client.get('/media/clips/%2e%2e%2fannotations.sqlite').status_code, 404)
+        self.assertEqual(self.client.get('/media/recordings/missing').status_code, 404)
+        self.assertEqual(self.client.get('/media/recordings/%2e%2e%2fannotations.sqlite').status_code, 404)
         self.assertIn('/api/annotations', self.client.get('/openapi.json').json()['paths'])
         paths = self.client.get('/openapi.json').json()['paths']
         self.assertIn('/api/species/{species_id}/candidates', paths)
@@ -110,35 +112,31 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(first.json(), {'submissionId':'submission-1', 'savedCount':3})
         payload['annotations'].reverse()
         self.assertEqual(self.client.post('/api/annotations', json=payload).json(), first.json())
-        self.assertEqual(self.count('annotation_events'), 3)
+        self.assertEqual(self.count('annotations'), 3)
         payload['annotations'][0]['label'] = 'no'
         self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 409)
         self.assertEqual(self.client.get('/api/submissions/submission-1').json(), first.json())
         self.assertEqual(self.client.get('/api/submissions/missing').status_code, 404)
         with TestClient(create_app(self.settings)) as restarted:
-            self.assertEqual(restarted.get('/api/species/DENEBR/candidates').json(), batch)
+            self.assertEqual(restarted.get('/api/species/DENEBR/candidates').json()['clips'], [])
             payload['annotations'][0]['label'] = 'yes'
             self.assertEqual(restarted.post('/api/annotations', json=payload).json(), first.json())
-        self.assertEqual(self.count('annotation_events'), 3)
+        self.assertEqual(self.count('annotations'), 3)
 
     def test_atomic_validation_and_partial_completion(self):
         payload = self.payload()
         payload['annotations'][-1]['uri'] = 'forged.wav'
         self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 422)
-        self.assertEqual(self.count('submissions'), 0)
-        self.assertEqual(self.count('annotation_events'), 0)
+        self.assertEqual(self.count('annotations'), 0)
         payload = self.payload()
         payload['annotations'] = payload['annotations'][:1]
         self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
-        with self.repo.connection() as conn:
-            self.assertIsNone(conn.execute('SELECT completed_at FROM batches').fetchone()[0])
-        self.assertEqual(len(self.batch()['clips']), 3)
+        self.assertEqual(len(self.batch()['clips']), 2)
         complete = self.payload(submission_id='complete')
-        complete['annotations'][1]['label'] = 'unsure'
+        complete['annotations'][0]['label'] = 'unsure'
         self.assertEqual(self.client.post('/api/annotations', json=complete).status_code, 200)
-        self.assertEqual(self.count('annotation_events'), 3)
-        with self.repo.connection() as conn:
-            self.assertIsNotNone(conn.execute('SELECT completed_at FROM batches').fetchone()[0])
+        self.assertEqual(self.count('annotations'), 3)
+        self.assertEqual(self.batch()['clips'], [])
 
     def test_corrections_and_annotator_isolation(self):
         original = self.payload()
@@ -149,9 +147,9 @@ class ServerTests(unittest.TestCase):
         correction['annotations'][0]['label'] = 'unsure'
         self.assertEqual(self.client.post('/api/annotations', json=correction).status_code, 200)
         with self.repo.connection() as conn:
-            row = conn.execute('SELECT label,revision FROM effective_annotations WHERE window_id=?', (correction['annotations'][0]['windowId'],)).fetchone()
-            self.assertEqual(tuple(row), ('unsure',2))
-        other = Settings(local_dir=self.settings.local_dir, annotator='another-annotator')
+            row = conn.execute('SELECT label FROM annotations WHERE window_id=? ORDER BY rowid DESC LIMIT 1', (correction['annotations'][0]['windowId'],)).fetchone()
+            self.assertEqual(tuple(row), ('unsure',))
+        other = Settings(local_dir=self.settings.local_dir, annotator='another-annotator', audio_roots=self.settings.audio_roots)
         with TestClient(create_app(other)) as client:
             self.assertEqual(client.get('/api/submissions/submission-1').status_code, 404)
             self.assertEqual(client.post('/api/annotations', json=correction).status_code, 409)
@@ -159,8 +157,7 @@ class ServerTests(unittest.TestCase):
             foreign = self.payload(batch, 'other')
             foreign['annotations'][0]['label'] = 'no'
             self.assertEqual(client.post('/api/annotations', json=foreign).status_code, 200)
-        self.assertEqual(self.count('effective_annotations'), 6)
-        self.assertEqual(self.count('annotation_events'), 7)
+        self.assertEqual(self.count('annotations'), 7)
 
     def test_concurrent_timeout_retry_has_one_commit(self):
         payload = Submission.model_validate(self.payload())
@@ -168,14 +165,13 @@ class ServerTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=6) as pool:
             results = list(pool.map(lambda _: self.repo.save_submission(payload, self.settings.annotator), range(12)))
         self.assertTrue(all(r == results[0] for r in results))
-        self.assertEqual(self.count('submissions'), 1)
-        self.assertEqual(self.count('annotation_events'), 3)
+        self.assertEqual(self.count('annotations'), 3)
 
-    def test_concurrent_batch_assignment_stays_stable(self):
+    def test_concurrent_review_queries_return_same_unreviewed_windows(self):
         with ThreadPoolExecutor(max_workers=6) as pool:
             batches = list(pool.map(lambda _: self.repo.get_review_batch('DENEBR', 'concurrent', 15), range(12)))
         self.assertTrue(all(b == batches[0] for b in batches))
-        self.assertEqual(self.count('batches'), 1)
+        self.assertEqual(self.count('annotations'), 0)
 
     def test_invalid_submission_shapes(self):
         for change in ['duplicate','invalid-label','naive-time','unknown-window','wrong-species','bad-offset']:
@@ -188,22 +184,23 @@ class ServerTests(unittest.TestCase):
                 if change == 'wrong-species': payload['speciesId'] = 'BOAROS'
                 if change == 'bad-offset': payload['annotations'][0]['offsets'] = [2,1]
                 self.assertIn(self.client.post('/api/annotations',json=payload).status_code, [404,422])
-        self.assertEqual(self.count('submissions'),0)
+        self.assertEqual(self.count('annotations'),0)
 
     def test_import_idempotency_conflicts_and_identity_validation(self):
         self.assertFalse(self.service.import_bundle(self.manifest_path)['imported'])
         changed = copy.deepcopy(self.manifest)
+        # Export metadata does not create another candidate for the same window/species.
         changed['createdAt'] = '2026-11-03T00:00:00Z'
-        self.manifest_path.write_text(json.dumps(changed))
-        with self.assertRaises(AppError) as error:
-            self.service.import_bundle(self.manifest_path)
-        self.assertEqual(error.exception.status,409)
         changed['candidateSetId'] = 'second-set'
-        changed['candidates'][1]['offsets'] = [4,5]
+        changed['classifierRun']['id'] = 'new-run'
         self.manifest_path.write_text(json.dumps(changed))
-        with self.assertRaises(AppError): self.service.import_bundle(self.manifest_path)
-        self.assertEqual(self.count('candidate_sets'),1)
-        self.assertEqual(self.count('windows'),3)
+        self.assertFalse(self.service.import_bundle(self.manifest_path)['imported'])
+        changed['candidates'][1]['offsets'] = [0, 1]
+        self.manifest_path.write_text(json.dumps(changed))
+        with self.assertRaises(AppError):
+            self.service.import_bundle(self.manifest_path)
+        self.assertEqual(self.count('candidates'), 3)
+        self.assertEqual(self.count('windows'), 3)
 
     def test_import_rejects_invalid_bundles_without_partial_publish(self):
         for change in ['missing','traversal','absolute','duplicate','unknown-species','nan','distance','rank','duration','recording-conflict']:
@@ -211,30 +208,58 @@ class ServerTests(unittest.TestCase):
                 manifest = copy.deepcopy(self.manifest)
                 manifest['candidateSetId'] = change
                 c = manifest['candidates'][0]
-                if change == 'missing': c['clip'] = 'missing.wav'
-                if change == 'traversal': c['clip'] = '../bundle/clip.wav'
-                if change == 'absolute': c['clip'] = str(self.root / 'bundle/clip.wav')
+                if change == 'missing': c['uri'] = 'missing.wav'
+                if change == 'traversal': c['uri'] = '../outside.wav'
+                if change == 'absolute': c['uri'] = str(self.root / 'outside.wav')
                 if change == 'duplicate': manifest['candidates'][1]['sourceWindowId'] = c['sourceWindowId']
                 if change == 'unknown-species': manifest['speciesId'] = 'UNKNOWN'
                 if change == 'nan': c['logit'] = float('nan')
                 if change == 'distance': c['boundaryDistance'] = 0
                 if change == 'rank': c['rank'] = 3
-                if change == 'duration': c['offsets'] = [0,2]
+                if change == 'duration': c['offsets'] = [0,999]
                 if change == 'recording-conflict': c['uri'] = 'conflicting.wav'
                 self.manifest_path.write_text(json.dumps(manifest))
                 with self.assertRaises((AppError,ValidationError)):
                     self.service.import_bundle(self.manifest_path)
-                self.assertEqual(self.count('candidate_sets'),1)
+                self.assertEqual(self.count('candidates'),3)
 
-    def test_corrupt_media_and_missing_registered_file(self):
-        (self.manifest_path.parent / 'clip.wav').write_bytes(b'not a wav')
-        with self.assertRaises(AppError): self.service.import_bundle(self.manifest_path)
+    def test_corrupt_recording_and_missing_registered_file(self):
+        audio = self.root/'audio/site/audio.wav'
+        audio.write_bytes(b'not a wav')
+        with self.assertRaises(AppError):
+            self.service.import_bundle(self.manifest_path)
         batch = self.batch()
-        path = next((self.settings.local_dir / 'clips').glob('*.wav'))
-        path.unlink()
-        self.assertEqual(self.client.get(batch['clips'][0]['audioUrl']).status_code,404)
+        audio.unlink()
+        self.assertEqual(self.client.get(batch['clips'][0]['audioUrl']).status_code, 404)
 
-    def test_maximum_batch_and_import_does_not_replace_membership(self):
+    def test_recording_path_resolution_rejects_unsafe_paths_and_unknown_roots(self):
+        for uri in ['../outside.wav', '/absolute.wav', 'C:/outside.wav', 'site\\audio.wav']:
+            with self.subTest(uri=uri):
+                with self.assertRaises(AppError) as error:
+                    self.service.recording_path({'dataset_name': 'grillos', 'file_path': uri})
+                self.assertEqual(error.exception.status, 422)
+        with self.assertRaises(AppError):
+            self.service.recording_path({'dataset_name': 'unconfigured', 'file_path': 'audio.wav'})
+
+    def test_recording_url_shared_by_windows_and_range_uses_full_source(self):
+        batch = self.batch()
+        urls = {clip['audioUrl'] for clip in batch['clips']}
+        self.assertEqual(len(urls), 1)
+        for clip in batch['clips']:
+            self.assertEqual([clip['startSeconds'], clip['endSeconds']], clip['offsets'])
+            self.assertNotIn('clipId', clip)
+        source = (self.root/'audio/site/audio.wav').read_bytes()
+        self.assertEqual(self.client.get(next(iter(urls))).content, source)
+        response = self.client.get(next(iter(urls)), headers={'Range': 'bytes=100-199'})
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.content, source[100:200])
+        with self.repo.connection() as conn:
+            fields = {row[1] for row in conn.execute('PRAGMA table_info(windows)')}
+        self.assertEqual(fields, {'id', 'recording_id', 'source_window_id',
+                                  'start_seconds', 'end_seconds'})
+        self.assertFalse((self.settings.local_dir/'clips').exists())
+
+    def test_maximum_batch_and_new_candidates_follow_existing_windows(self):
         path, manifest = make_bundle(self.root/'large', count=20, set_id='large', species='BOAROS')
         self.service.import_bundle(path)
         batch = self.client.get('/api/species/BOAROS/candidates').json()
@@ -244,22 +269,111 @@ class ServerTests(unittest.TestCase):
         manifest['candidateSetId'] = 'new-denebr'
         path.write_text(json.dumps(manifest))
         self.service.import_bundle(path)
-        self.assertEqual(before,self.batch())
+        after = self.batch()
+        self.assertEqual(before['clips'], after['clips'][:len(before['clips'])])
+        self.assertEqual(len(after['clips']), 15)
+
+    def test_only_four_tables_and_latest_answer_history(self):
+        with self.repo.connection() as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        self.assertEqual(tables, {'recordings', 'windows', 'annotations', 'candidates'})
+        payload = self.payload()
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        payload['submissionId'] = 'fresh-save-same-labels'
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        self.assertEqual(self.count('annotations'), 6)
+        with self.repo.connection() as conn:
+            latest = conn.execute('''
+                SELECT a.* FROM annotations a WHERE NOT EXISTS (
+                    SELECT 1 FROM annotations newer
+                    WHERE newer.window_id=a.window_id AND newer.species=a.species
+                    AND newer.annotator=a.annotator AND newer.rowid>a.rowid
+                )
+            ''').fetchall()
+        self.assertEqual(len(latest), 3)
+        self.assertTrue(all(row['submission_id'] == payload['submissionId'] for row in latest))
+
+    def test_refresh_advances_to_remaining_candidates(self):
+        path, _ = make_bundle(self.root/'queue', count=20, species='BOAROS', set_id='queue')
+        self.service.import_bundle(path)
+        batch = self.client.get('/api/species/BOAROS/candidates').json()
+        payload = self.payload(batch)
+        payload['speciesId'] = 'BOAROS'
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        remaining = self.client.get('/api/species/BOAROS/candidates').json()
+        self.assertEqual(len(remaining['clips']), 5)
+        self.assertTrue(set(r['id'] for r in batch['clips']).isdisjoint(
+            r['id'] for r in remaining['clips']
+        ))
+        # The old context still permits corrections after the queue advances.
+        payload['submissionId'] = 'correct-old-page'
+        payload['annotations'] = [dict(payload['annotations'][0], label='no')]
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+
+    def test_minimal_recording_and_annotation_columns_and_server_timestamp(self):
+        with self.repo.connection() as conn:
+            recording_columns = {row[1] for row in conn.execute('PRAGMA table_info(recordings)')}
+            annotation_columns = {row[1] for row in conn.execute('PRAGMA table_info(annotations)')}
+        self.assertEqual(recording_columns, {'id', 'source_recording_id', 'file_path', 'dataset_name'})
+        self.assertEqual(annotation_columns, {'id', 'window_id', 'species', 'annotator',
+                                              'label', 'submission_id', 'created_at'})
+        payload = self.payload()
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        with self.repo.connection() as conn:
+            timestamp = conn.execute('SELECT created_at FROM annotations LIMIT 1').fetchone()[0]
+        from datetime import datetime, timezone
+        timestamp = datetime.fromisoformat(timestamp)
+        self.assertEqual(timestamp.utcoffset().total_seconds(), 0)
+        self.assertLess(abs((datetime.now(timezone.utc) - timestamp).total_seconds()), 30)
+        # Client time is not persisted or used to identify answer retries.
+        payload['createdAt'] = '2020-01-01T00:00:00Z'
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        self.assertEqual(self.count('annotations'), 3)
+        for change in ['missing-answer', 'extra-answer', 'metadata']:
+            changed = copy.deepcopy(payload)
+            if change == 'missing-answer': changed['annotations'].pop()
+            if change == 'extra-answer':
+                changed['annotations'].append(dict(changed['annotations'][0], windowId='unknown'))
+            if change == 'metadata': changed['annotations'][0]['uri'] = 'forged.wav'
+            self.assertEqual(self.client.post('/api/annotations', json=changed).status_code, 409)
+
+    def test_old_schema_rejected_without_reset(self):
+        with self.repo.connection(True) as conn:
+            conn.execute('PRAGMA user_version=1')
+        with self.assertRaisesRegex(RuntimeError, 'fresh store'):
+            self.repo.initialize()
+        self.assertEqual(self.count('windows'), 3)
 
     def test_future_schema_rejected_without_reset(self):
         with self.repo.connection(True) as conn: conn.execute('PRAGMA user_version=99')
         with self.assertRaises(RuntimeError): self.repo.initialize()
         self.assertEqual(self.count('windows'),3)
 
-    def test_classifier_run_provenance_is_immutable(self):
+    def test_minimal_candidate_columns_and_computed_annotation_count(self):
+        with self.repo.connection() as conn:
+            fields = {row[1] for row in conn.execute('PRAGMA table_info(candidates)')}
+        self.assertEqual(fields, {'id', 'window_id', 'species'})
+        batch = self.batch()
+        self.assertTrue(all(clip['numAnnotations'] == 0 for clip in batch['clips']))
+        payload = self.payload(batch)
+        payload['annotations'] = payload['annotations'][:1]
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        payload['submissionId'] = 'correction'
+        payload['annotations'][0]['label'] = 'no'
+        self.assertEqual(self.client.post('/api/annotations', json=payload).status_code, 200)
+        other = self.repo.get_review_batch('DENEBR', 'someone-else', 15)
+        counts = {clip['id']: clip['numAnnotations'] for clip in other['clips']}
+        self.assertEqual(counts[payload['annotations'][0]['windowId']], 2)
+        self.assertEqual(sorted(counts.values()), [0, 0, 2])
+        # A different species' labels must not increase this candidate's count.
         manifest = copy.deepcopy(self.manifest)
-        manifest['candidateSetId'] = 'different-set'
-        manifest['classifierRun']['embeddingModel'] = 'different-model'
+        manifest['speciesId'] = 'BOAROS'
         self.manifest_path.write_text(json.dumps(manifest))
-        with self.assertRaises(AppError) as error:
-            self.service.import_bundle(self.manifest_path)
-        self.assertEqual(error.exception.status,409)
-        self.assertEqual(self.count('candidate_sets'),1)
+        self.service.import_bundle(self.manifest_path)
+        self.assertTrue(all(clip['numAnnotations'] == 0 for clip in
+                            self.repo.get_review_batch('BOAROS', 'someone-else', 15)['clips']))
 
     def test_concurrent_initialization_and_foreign_keys(self):
         store = self.root/'fresh'
@@ -269,20 +383,18 @@ class ServerTests(unittest.TestCase):
         repository.health()
         with repository.connection() as conn:
             self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone()[0],1)
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],1)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0],5)
             self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(),[])
 
-    def test_transaction_failure_rolls_back_events_and_acknowledgement(self):
+    def test_transaction_failure_rolls_back_answers_and_retry_metadata(self):
         payload = self.payload()
-        # Force a failure after the submission and first answer have been inserted.
+        # Force a failure after the first answer has been inserted.
         with self.repo.connection(True) as conn:
-            conn.execute("CREATE TRIGGER fail_second BEFORE INSERT ON annotation_events WHEN NEW.window_id='test-corpus:window:2' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END")
+            conn.execute("CREATE TRIGGER fail_second BEFORE INSERT ON annotations WHEN NEW.window_id='test-corpus:window:2' BEGIN SELECT RAISE(ABORT,'simulated write failure'); END")
         with self.assertLogs('server.app.main', level='ERROR'):
             response = self.client.post('/api/annotations',json=payload)
         self.assertEqual(response.status_code,503)
-        self.assertEqual(self.count('submissions'),0)
-        self.assertEqual(self.count('annotation_events'),0)
-        self.assertEqual(self.count('effective_annotations'),0)
+        self.assertEqual(self.count('annotations'),0)
         with self.repo.connection(True) as conn: conn.execute('DROP TRIGGER fail_second')
         self.assertEqual(self.client.post('/api/annotations',json=payload).status_code,200)
 

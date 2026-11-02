@@ -1,14 +1,13 @@
-"""SQLite adapter. Short-lived connections; transactions serialize assignment/saves."""
+"""SQLite adapter. Short-lived connections; transactions serialize imports and saves."""
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import sqlite3
-import uuid
+import time
 
 from .repository import AppError
-from .serialization import canonical, digest
+from .serialization import digest
 
 
 def now():
@@ -28,7 +27,7 @@ class SQLiteRepository:
         conn.execute('PRAGMA foreign_keys=ON')
 
         try:
-            # Reserve the writer before reading state used to assign IDs/revisions.
+            # Reserve the writer before checking retries or source identities.
             conn.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
             yield conn
             conn.commit()
@@ -43,7 +42,15 @@ class SQLiteRepository:
         conn = sqlite3.connect(self.database, timeout=30, isolation_level=None)
 
         try:
-            conn.execute('PRAGMA journal_mode=WAL')
+            # Changing journal mode can return BUSY immediately during parallel startup.
+            for attempt in range(10):
+                try:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    break
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or attempt == 9:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
             script = (Path(__file__).parent / 'migrations/001_initial.sql').read_text()
 
             # Lock before checking the version so concurrent startups cannot both
@@ -52,291 +59,180 @@ class SQLiteRepository:
             version = conn.execute('PRAGMA user_version').fetchone()[0]
 
             if version == 0:
-                for statement in script.split(';'):
-                    if statement.strip():
+                statement = ''
+                for line in script.splitlines(keepends=True):
+                    statement += line
+                    if sqlite3.complete_statement(statement):
                         conn.execute(statement)
-            elif version != 1:
-                raise RuntimeError(f'Unsupported database schema version {version}')
+                        statement = ''
+                if statement.strip():
+                    raise RuntimeError('Incomplete schema statement')
+            elif version != 5:
+                raise RuntimeError(
+                    f'Unsupported database schema version {version}. '
+                    'The four-table schema requires a fresh store; back up the old store first.'
+                )
             conn.commit()
         finally:
             conn.close()
 
     def health(self):
         with self.connection() as conn:
-            conn.execute('SELECT 1 FROM candidate_sets LIMIT 1').fetchall()
+            conn.execute('SELECT 1 FROM candidates LIMIT 1').fetchall()
 
-    def import_candidate_set(self, bundle, manifest_hash, clips):
-        """Publish one complete set, preserving immutable source and model IDs."""
+    def import_candidate_set(self, bundle):
+        """Import recording/window identities and add previously unseen candidates."""
+        inserted = 0
         with self.connection(True) as conn:
-            existing = conn.execute(
-                'SELECT manifest_hash FROM candidate_sets WHERE id=?',
-                (bundle.candidateSetId,),
-            ).fetchone()
-            if existing:
-                if existing[0] != manifest_hash:
-                    raise AppError(409, 'Candidate set ID already has different content')
-                return False
-
-            # A run ID identifies the model provenance across selection sets.
-            for row in conn.execute('SELECT manifest FROM candidate_sets'):
-                previous_run = json.loads(row[0])['classifierRun']
-                if (
-                    previous_run['id'] == bundle.classifierRun.id
-                    and previous_run != bundle.classifierRun.model_dump(mode='json')
-                ):
-                    raise AppError(409, 'Classifier run ID already has different provenance')
-
-            conn.execute(
-                'INSERT INTO candidate_sets VALUES(?,?,?,?,?)',
-                (
-                    bundle.candidateSetId,
-                    bundle.speciesId,
-                    manifest_hash,
-                    canonical(bundle.model_dump(mode='json')),
-                    now(),
-                ),
-            )
-
             for candidate in bundle.candidates:
                 window_id = f'{bundle.sourceDatasetId}:window:{candidate.sourceWindowId}'
                 recording_id = f'{bundle.sourceDatasetId}:recording:{candidate.recordingId}'
-                window_metadata = candidate.model_dump(
-                    include={'recordingId', 'offsets', 'uri', 'datasetName'},
-                    mode='json',
+                recording = (
+                    recording_id, candidate.recordingId, candidate.uri, candidate.datasetName,
                 )
-                recording = canonical(
-                    {k: v for k, v in window_metadata.items() if k != 'offsets'}
-                    | {'deployment': candidate.deployment}
+                self._insert_source(conn, 'recordings', recording)
+                self._insert_source(conn, 'windows', (
+                    window_id, recording_id, candidate.sourceWindowId, *candidate.offsets,
+                ))
+                cursor = conn.execute(
+                    'INSERT INTO candidates VALUES(?,?,?) ON CONFLICT(window_id,species) DO NOTHING',
+                    (digest([window_id, bundle.speciesId]), window_id, bundle.speciesId),
                 )
+                inserted += cursor.rowcount
+        return inserted > 0
 
-                # Reusing a source ID is safe only when its metadata agrees.
-                for table, identity, metadata in [
-                    ('recordings', recording_id, recording),
-                    ('windows', window_id, canonical(window_metadata)),
-                ]:
-                    existing = conn.execute(
-                        f'SELECT metadata FROM {table} WHERE id=?', (identity,)
-                    ).fetchone()
-                    if existing and existing[0] != metadata:
-                        raise AppError(409, f'Conflicting source identity: {identity}')
-                    if not existing:
-                        if table == 'windows':
-                            conn.execute(
-                                'INSERT INTO windows VALUES(?,?,?)',
-                                (identity, recording_id, metadata),
-                            )
-                        else:
-                            conn.execute(
-                                'INSERT INTO recordings VALUES(?,?)',
-                                (identity, metadata),
-                            )
+    @staticmethod
+    def _insert_source(conn, table, values):
+        # Table names are internal constants, never supplied by the client.
+        previous = conn.execute(f'SELECT * FROM {table} WHERE id=?', (values[0],)).fetchone()
+        if previous:
+            if tuple(previous) != values:
+                raise AppError(409, f'Conflicting source identity: {values[0]}')
+            return
+        placeholders = ','.join('?' for _ in values)
+        conn.execute(f'INSERT INTO {table} VALUES({placeholders})', values)
 
-                clip = clips[candidate.clip]
-                conn.execute(
-                    'INSERT OR IGNORE INTO clips VALUES(?,?,?,?,?)',
-                    (
-                        clip['id'], clip['path'], clip['sha256'],
-                        clip['sample_rate'], clip['frames'],
-                    ),
-                )
-                conn.execute(
-                    'INSERT INTO candidates VALUES(?,?,?,?)',
-                    (bundle.candidateSetId, window_id, candidate.rank, clip['id']),
-                )
+    @staticmethod
+    def _batch_id(species, annotator):
+        # A query context, not a persisted assignment or authentication token.
+        return digest([species, annotator])
 
-            return True
+    @staticmethod
+    def _metadata(row):
+        return dict(
+            recordingId=row['source_recording_id'],
+            offsets=[row['start_seconds'], row['end_seconds']],
+            uri=row['file_path'], datasetName=row['dataset_name'],
+        )
 
     def get_review_batch(self, species, annotator, size):
-        """Reuse the issued batch, or assign unreviewed windows from one set."""
-        with self.connection(True) as conn:
-            batch = conn.execute(
+        """Return unreviewed windows for this species; refresh advances the list."""
+        with self.connection() as conn:
+            rows = conn.execute(
                 '''
-                SELECT * FROM batches
-                WHERE species=? AND annotator=?
-                ORDER BY rowid DESC LIMIT 1
-                ''',
-                (species, annotator),
-            ).fetchone()
-
-            # Completed batches remain stable until an explicit next operation
-            # is introduced along with frontend paging.
-            if not batch:
-                rows = conn.execute(
-                    '''
-                    SELECT c.* FROM candidates c
-                    JOIN candidate_sets s ON s.id=c.set_id
-                    WHERE s.species=? AND NOT EXISTS (
-                        SELECT 1 FROM effective_annotations e
-                        WHERE e.window_id=c.window_id AND e.species=? AND e.annotator=?
-                    )
-                    ORDER BY s.rowid,c.rank
-                    ''',
-                    (species, species, annotator),
-                ).fetchall()
-                if not rows:
-                    return {'batchId': None, 'clips': []}
-
-                set_id = rows[0]['set_id']
-                chosen = [row for row in rows if row['set_id'] == set_id][:size]
-                batch_id = str(uuid.uuid4())
-
-                conn.execute(
-                    'INSERT INTO batches VALUES(?,?,?,?,?,NULL)',
-                    (batch_id, species, annotator, set_id, now()),
+                SELECT w.*,r.source_recording_id,r.file_path,r.dataset_name,
+                    (SELECT count(*) FROM annotations a
+                     WHERE a.window_id=w.id AND a.species=c.species) AS num_annotations
+                FROM candidates c
+                JOIN windows w ON w.id=c.window_id
+                JOIN recordings r ON r.id=w.recording_id
+                WHERE c.species=? AND NOT EXISTS (
+                    SELECT 1 FROM annotations a
+                    WHERE a.window_id=w.id AND a.species=c.species AND a.annotator=?
                 )
-                conn.executemany(
-                    'INSERT INTO batch_members VALUES(?,?,?,?)',
-                    [(batch_id, row['window_id'], row['rank'], row['clip_id']) for row in chosen],
-                )
-            else:
-                batch_id = batch['id']
-
-            records = conn.execute(
-                '''
-                SELECT w.id,w.metadata,m.clip_id FROM batch_members m
-                JOIN windows w ON w.id=m.window_id
-                WHERE m.batch_id=? ORDER BY m.rank
+                ORDER BY c.rowid LIMIT ?
                 ''',
-                (batch_id,),
+                (species, annotator, size),
             ).fetchall()
+            if not rows:
+                return {'batchId': None, 'clips': []}
+            chosen = rows[:size]
             return {
-                'batchId': batch_id,
-                'clips': [
-                    dict(id=row['id'], **json.loads(row['metadata']), clipId=row['clip_id'])
-                    for row in records
-                ],
+                'batchId': self._batch_id(species, annotator),
+                'clips': [dict(id=row['id'], **self._metadata(row), mediaRecordingId=row['recording_id'],
+                               numAnnotations=row['num_annotations'])
+                          for row in chosen],
             }
 
     def save_submission(self, submission, annotator):
-        """Validate, record history, and update current labels in one transaction."""
-        payload = submission.model_dump(mode='json')
-        # Answer order is irrelevant when recognizing a retry of the same payload.
-        payload['annotations'].sort(key=lambda a: a['windowId'])
-        payload_hash = digest(payload)
-
+        """Save individual answers atomically; repeated requests create no new rows."""
         with self.connection(True) as conn:
-            # Resolve a retry before allocating any new events or revisions.
-            existing = conn.execute(
-                'SELECT * FROM submissions WHERE id=?', (submission.submissionId,)
-            ).fetchone()
-            if existing:
-                if existing['annotator'] != annotator or existing['payload_hash'] != payload_hash:
-                    raise AppError(409, 'Submission ID already has different content or owner')
-                return json.loads(existing['acknowledgement'])
-
-            batch = conn.execute(
-                'SELECT * FROM batches WHERE id=? AND species=? AND annotator=?',
-                (submission.batchId, submission.speciesId, annotator),
-            ).fetchone()
-            if not batch:
-                raise AppError(404, 'Unknown batch for this species and annotator')
-
-            members = {
-                row['id']: json.loads(row['metadata'])
-                for row in conn.execute(
-                    '''
-                    SELECT w.* FROM windows w
-                    JOIN batch_members m ON m.window_id=w.id
-                    WHERE m.batch_id=?
-                    ''',
-                    (submission.batchId,),
-                )
-            }
-            # Check every answer against trusted metadata before writing any.
-            for answer in submission.annotations:
-                metadata = answer.model_dump(
-                    include={'recordingId', 'offsets', 'uri', 'datasetName'},
-                    mode='json',
-                )
-                if members.get(answer.windowId) != metadata:
-                    raise AppError(422, 'Annotation is outside the batch or source metadata differs')
-
-            timestamp = now()
-            acknowledgement = {
-                'submissionId': submission.submissionId,
-                'savedCount': len(submission.annotations),
-            }
-            conn.execute(
-                'INSERT INTO submissions VALUES(?,?,?,?,?,?,?)',
-                (
-                    submission.submissionId, submission.batchId, annotator,
-                    payload_hash, canonical(payload), canonical(acknowledgement), timestamp,
-                ),
-            )
-
-            for answer in submission.annotations:
-                key = (answer.windowId, submission.speciesId, annotator)
-                current = conn.execute(
-                    '''
-                    SELECT * FROM effective_annotations
-                    WHERE window_id=? AND species=? AND annotator=?
-                    ''',
-                    key,
-                ).fetchone()
-                # A fresh submission ID need not create history for an unchanged answer.
-                if current and current['label'] == answer.label:
-                    continue
-
-                revision = current['revision'] + 1 if current else 1
-                event = conn.execute(
-                    '''
-                    INSERT INTO annotation_events (
-                        submission_id,window_id,species,annotator,label,revision,server_time
-                    ) VALUES(?,?,?,?,?,?,?)
-                    ''',
-                    (submission.submissionId, *key, answer.label, revision, timestamp),
-                )
-                conn.execute(
-                    '''
-                    INSERT INTO effective_annotations VALUES(?,?,?,?,?,?)
-                    ON CONFLICT(window_id,species,annotator) DO UPDATE SET
-                        event_id=excluded.event_id,
-                        label=excluded.label,
-                        revision=excluded.revision
-                    ''',
-                    (*key, event.lastrowid, answer.label, revision),
-                )
-
-            # Partial saves stay open; any effective label, including unsure,
-            # counts as reviewed when deciding whether the batch is complete.
-            remaining = conn.execute(
+            previous = conn.execute(
                 '''
-                SELECT count(*) FROM batch_members m
-                WHERE batch_id=? AND NOT EXISTS (
-                    SELECT 1 FROM effective_annotations e
-                    WHERE e.window_id=m.window_id AND e.species=? AND e.annotator=?
-                )
+                SELECT a.*,w.start_seconds,w.end_seconds,
+                       r.source_recording_id,r.file_path,r.dataset_name
+                FROM annotations a JOIN windows w ON w.id=a.window_id
+                JOIN recordings r ON r.id=w.recording_id
+                WHERE a.submission_id=? ORDER BY a.window_id
                 ''',
-                (submission.batchId, submission.speciesId, annotator),
-            ).fetchone()[0]
-            if not remaining:
-                conn.execute(
-                    'UPDATE batches SET completed_at=COALESCE(completed_at,?) WHERE id=?',
-                    (timestamp, submission.batchId),
+                (submission.submissionId,),
+            ).fetchall()
+            valid_context = submission.batchId == self._batch_id(submission.speciesId, annotator)
+            if previous:
+                # Compare actual saved answers, avoiding stored hashes or duplicate counts.
+                saved = [dict(windowId=row['window_id'], label=row['label'],
+                              **self._metadata(row)) for row in previous]
+                requested = sorted(
+                    [answer.model_dump(mode='json') for answer in submission.annotations],
+                    key=lambda answer: answer['windowId'],
                 )
+                same_owner_and_species = all(
+                    row['annotator'] == annotator and row['species'] == submission.speciesId
+                    for row in previous
+                )
+                if not valid_context or not same_owner_and_species or saved != requested:
+                    raise AppError(409, 'Submission ID already has different answers or owner')
+                return {'submissionId': submission.submissionId, 'savedCount': len(previous)}
 
-            return acknowledgement
+            if not valid_context:
+                raise AppError(404, 'Unknown review context for this species and annotator')
+
+            for answer in submission.annotations:
+                row = conn.execute(
+                    '''
+                    SELECT w.*,r.source_recording_id,r.file_path,r.dataset_name
+                    FROM windows w JOIN recordings r ON r.id=w.recording_id
+                    JOIN candidates c ON c.window_id=w.id
+                    WHERE w.id=? AND c.species=?
+                    ''',
+                    (answer.windowId, submission.speciesId),
+                ).fetchone()
+                metadata = answer.model_dump(
+                    include={'recordingId', 'offsets', 'uri', 'datasetName'}, mode='json'
+                )
+                if not row or self._metadata(row) != metadata:
+                    raise AppError(422, 'Annotation is not a candidate for this species or metadata differs')
+
+            created_at = now()
+            for answer in submission.annotations:
+                conn.execute(
+                    'INSERT INTO annotations VALUES(?,?,?,?,?,?,?)',
+                    (
+                        digest([submission.submissionId, answer.windowId]), answer.windowId,
+                        submission.speciesId, annotator, answer.label,
+                        submission.submissionId, created_at,
+                    ),
+                )
+            return {'submissionId': submission.submissionId,
+                    'savedCount': len(submission.annotations)}
 
     def get_submission(self, submission_id, annotator):
         with self.connection() as conn:
             row = conn.execute(
-                'SELECT acknowledgement FROM submissions WHERE id=? AND annotator=?',
+                '''
+                SELECT submission_id,count(*) AS saved_count FROM annotations
+                WHERE submission_id=? AND annotator=? GROUP BY submission_id
+                ''',
                 (submission_id, annotator),
             ).fetchone()
             if not row:
                 raise AppError(404, 'Unknown submission')
-            return json.loads(row[0])
+            return {'submissionId': row['submission_id'], 'savedCount': row['saved_count']}
 
-    def get_clip(self, clip_id):
+    def get_recording(self, recording_id):
+        """Return only registered recording metadata; paths are resolved by the service."""
         with self.connection() as conn:
-            row = conn.execute(
-                'SELECT path FROM clips WHERE id=?', (clip_id,)
-            ).fetchone()
+            row = conn.execute('SELECT * FROM recordings WHERE id=?', (recording_id,)).fetchone()
         if not row:
-            raise AppError(404, 'Unknown clip')
-
-        # Resolve before checking containment, including any filesystem symlinks.
-        path = (self.local_dir / row[0]).resolve()
-        if not path.is_relative_to(self.local_dir / 'clips') or not path.is_file():
-            raise AppError(404, 'Clip file unavailable')
-        return path
+            raise AppError(404, 'Unknown recording')
+        return dict(row)

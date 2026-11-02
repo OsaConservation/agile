@@ -1,91 +1,45 @@
-CREATE TABLE candidate_sets (
-    id TEXT PRIMARY KEY,
-    species TEXT NOT NULL,
-    manifest_hash TEXT NOT NULL,
-    manifest TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
+-- Original audio files. Source IDs remain scoped to their dataset.
 CREATE TABLE recordings (
     id TEXT PRIMARY KEY,
-    metadata TEXT NOT NULL
+    source_recording_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    dataset_name TEXT NOT NULL,
+    UNIQUE(dataset_name, source_recording_id)
 );
 
+-- An interval within the original recording; no separate audio asset.
 CREATE TABLE windows (
     id TEXT PRIMARY KEY,
     recording_id TEXT NOT NULL REFERENCES recordings(id),
-    metadata TEXT NOT NULL
+    source_window_id INTEGER NOT NULL,
+    start_seconds REAL NOT NULL CHECK(start_seconds >= 0),
+    end_seconds REAL NOT NULL CHECK(end_seconds > start_seconds),
+    UNIQUE(recording_id, start_seconds, end_seconds)
 );
 
-CREATE TABLE clips (
-    id TEXT PRIMARY KEY,
-    path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    sample_rate INTEGER NOT NULL,
-    frames INTEGER NOT NULL
-);
-
+-- One review candidate per window and target species.
 CREATE TABLE candidates (
-    set_id TEXT NOT NULL REFERENCES candidate_sets(id),
-    window_id TEXT NOT NULL REFERENCES windows(id),
-    rank INTEGER NOT NULL,
-    clip_id TEXT NOT NULL REFERENCES clips(id),
-    PRIMARY KEY(set_id,window_id),
-    UNIQUE(set_id,rank)
-);
-
-CREATE TABLE batches (
     id TEXT PRIMARY KEY,
+    window_id TEXT NOT NULL REFERENCES windows(id),
     species TEXT NOT NULL,
-    annotator TEXT NOT NULL,
-    set_id TEXT NOT NULL REFERENCES candidate_sets(id),
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    UNIQUE(id,species,annotator)
+    UNIQUE(window_id, species)
 );
 
-CREATE TABLE batch_members (
-    batch_id TEXT NOT NULL REFERENCES batches(id),
-    window_id TEXT NOT NULL REFERENCES windows(id),
-    rank INTEGER NOT NULL,
-    clip_id TEXT NOT NULL REFERENCES clips(id),
-    PRIMARY KEY(batch_id,window_id)
-);
-
-CREATE TABLE submissions (
+-- Each accepted answer is a row. Corrections append another answer.
+-- A submission ID groups answers and identifies retries; created_at is server UTC.
+CREATE TABLE annotations (
     id TEXT PRIMARY KEY,
-    batch_id TEXT NOT NULL REFERENCES batches(id),
-    annotator TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    acknowledgement TEXT NOT NULL,
-    server_time TEXT NOT NULL
-);
-
-CREATE TABLE annotation_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    submission_id TEXT NOT NULL REFERENCES submissions(id),
     window_id TEXT NOT NULL REFERENCES windows(id),
     species TEXT NOT NULL,
     annotator TEXT NOT NULL,
     label TEXT NOT NULL CHECK(label IN ('yes','no','unsure')),
-    revision INTEGER NOT NULL,
-    server_time TEXT NOT NULL,
-    UNIQUE(window_id,species,annotator,revision)
+    submission_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(submission_id, window_id)
 );
 
-CREATE TABLE effective_annotations (
-    window_id TEXT NOT NULL REFERENCES windows(id),
-    species TEXT NOT NULL,
-    annotator TEXT NOT NULL,
-    event_id INTEGER NOT NULL REFERENCES annotation_events(id),
-    label TEXT NOT NULL,
-    revision INTEGER NOT NULL,
-    PRIMARY KEY(window_id,species,annotator)
-);
-
-CREATE INDEX batch_lookup ON batches(species,annotator,created_at);
-
-CREATE INDEX set_species ON candidate_sets(species);
-
-PRAGMA user_version=1;
+-- Speed up species queues, per-window annotation lookups, and save retries.
+CREATE INDEX candidate_queue ON candidates(species);
+CREATE INDEX annotation_latest ON annotations(window_id, species, annotator);
+CREATE INDEX annotation_submission ON annotations(submission_id);
+PRAGMA user_version=5;

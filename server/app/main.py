@@ -28,7 +28,7 @@ def create_app(settings=None, repository=None):
         app.state.service = AnnotationService(repository, settings)
         yield
 
-    app = FastAPI(title='OSA local annotation server', version='0.2.0', lifespan=lifespan)
+    app = FastAPI(title='OSA local annotation server', version='0.5.0', lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.origins),
@@ -73,7 +73,7 @@ def create_app(settings=None, repository=None):
     @app.get('/health')
     def health():
         repository.health()
-        return {'status': 'ok', 'storage': 'sqlite', 'schemaVersion': 1}
+        return {'status': 'ok', 'storage': 'sqlite', 'schemaVersion': 5}
 
     @app.get('/api/species', response_model=list[Species])
     def species(request: Request):
@@ -95,12 +95,13 @@ def create_app(settings=None, repository=None):
     @app.get('/api/species/{species_id}/candidates', response_model=BatchResponse)
     def candidates(species_id: str, request: Request):
         batch = request.app.state.service.get_batch(species_id)
-        # Expose browser URLs in place of the repository's internal clip IDs.
+        # Each window uses its full recording URL with explicit playback bounds.
         return {
             'batchId': batch['batchId'],
             'clips': [
-                {k: v for k, v in r.items() if k != 'clipId'}
-                | {'audioUrl': str(request.url_for('clip', clip_id=r['clipId']))}
+                {k: v for k, v in r.items() if k != 'mediaRecordingId'}
+                | {'audioUrl': str(request.url_for('recording_audio', recording_id=r['mediaRecordingId'])),
+                   'startSeconds': r['offsets'][0], 'endSeconds': r['offsets'][1]}
                 for r in batch['clips']
             ],
         }
@@ -113,8 +114,9 @@ def create_app(settings=None, repository=None):
     def submission_outcome(submission_id: str):
         return repository.get_submission(submission_id, settings.annotator)
 
-    @app.get('/media/clips/{clip_id}', name='clip')
-    def clip(clip_id: str):
-        return FileResponse(repository.get_clip(clip_id), media_type='audio/wav')
+    @app.get('/media/recordings/{recording_id}', name='recording_audio')
+    def recording_audio(recording_id: str, request: Request):
+        path = request.app.state.service.get_recording_audio(recording_id)
+        return FileResponse(path, media_type='audio/wav')
 
     return app

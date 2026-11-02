@@ -1,3 +1,56 @@
+# Current implementation: four-table server
+
+This section supersedes the historical design below. Database schema version 5
+uses exactly four tables; candidate bundle schema version 2 is metadata-only.
+Hoplite remains read-only. See README.md for run commands and current contracts.
+
+| Structure | Stored fields and responsibility |
+|---|---|
+| Recording | ID, source recording ID, original relative file path, dataset name |
+| Window | Recording FK, source window ID, start/end seconds. No audio asset fields |
+| Candidate | ID, window FK, species; unique by window/species |
+| Annotation | Individual answer, person/species/window, submission ID, one server UTC timestamp |
+
+Original recordings are served through registered recording IDs with HTTP byte
+ranges. Configured project roots resolve filenames; reject traversal, absolute
+filenames and symlink escape. Validate window durations before importing metadata.
+The frontend receives full recording URLs plus startSeconds/endSeconds and limits
+playback using custom Play/Pause controls. Boundaries are approximate; the full
+recording is accessible. Standalone reference/demo audio retains native controls.
+Do not export clips or copy original audio. Keep source_window_id as the explicit
+Hoplite embedding key, scoped by the source corpus in the server window ID.
+
+Candidate selection/classifier metadata remains in exported research manifests,
+not the application database. Reimport adds only new window/species combinations.
+Review lists query up to 15 unreviewed windows in insertion order. Refresh advances
+them. batchId is a species/annotator context, not persisted assignment membership.
+numAnnotations is an indexed SQL count per window/species, including corrections;
+use distinct annotators separately if the product needs reviewer counts.
+
+Every accepted answer from a new save creates a row. Compare saved answers directly
+for retries and derive saved counts with SQL; do not store payload hashes, save
+sizes, or client timestamps. Keep the existing frontend client timestamp field
+accepted but unpersisted. Index species queues, annotation window/species/person
+lookups, and submission IDs.
+
+ Exact retries create none;
+conflicting content/ownership returns 409. Complete saves/imports are atomic.
+Latest inserted answer per window/species/annotator is current; never count
+history as multiple training votes. Unsure supersedes a previous binary answer.
+
+Keep thin FastAPI routes, services, repository Protocol, and the SQLite adapter.
+HTTP uses camelCase; SQL uses snake_case. Species config stays in species.json.
+No ORM or shared constants package is needed. Tests cover minimal schemas,
+counts, recording ranges/path safety, bounds, query advancement, source identity,
+rollback, concurrent retries/startup, corrections and real-corpus compatibility.
+Back up old stores before conversion. Unknown schemas fail without resetting data.
+
+Next: implement frontend ServerProvider fetches, then a versioned snapshot and
+checked embedding join for training. Snapshot files do not require another table.
+Cloud audio storage and BigQuery remain future work.
+
+## Earlier design (historical; superseded above)
+
 # Local annotation server: implementation and test plan
 
 Status: chunks 1 and 2 implemented: FastAPI, separate SQLite storage, versioned

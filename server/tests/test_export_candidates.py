@@ -42,9 +42,9 @@ class ExportTests(unittest.TestCase):
 
     def export(self, **changes):
         args = dict(results=SimpleNamespace(search_results=[SimpleNamespace(window_id=i, sort_score=-100) for i in [3,1,2]]),
-            db=FakeSource(), weights=np.array([1.,0.]), bias=0., audio_loader=self.loader,
+            db=FakeSource(), weights=np.array([1.,0.]), bias=0.,
             output_dir=self.root/'bundle', species_id='DENEBR', source_dataset_id='test',
-            embedding_model='fixture', sample_rate=8000, count=15)
+            embedding_model='fixture', count=15)
         return export_candidates(**(args | changes))
 
     def test_signed_logits_tie_order_audio_offsets_and_import(self):
@@ -52,12 +52,17 @@ class ExportTests(unittest.TestCase):
         bundle = json.loads(path.read_text())
         self.assertEqual([c['sourceWindowId'] for c in bundle['candidates']], [2,3,1])
         self.assertEqual([c['logit'] for c in bundle['candidates']], [1.,-1.,-2.])
-        self.assertEqual(self.calls, [('site/recording.wav',2.),('site/recording.wav',3.),('site/recording.wav',1.)])
-        for c in bundle['candidates']:
-            with wave.open(str(path.parent/c['clip'])) as wav:
-                self.assertEqual(wav.getnframes(),8000)
-                self.assertEqual(wav.getsampwidth(),2)
-        settings = Settings(local_dir=self.root/'store')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(bundle['schemaVersion'], 2)
+        self.assertEqual([c['offsets'] for c in bundle['candidates']], [[2,3],[3,4],[1,2]])
+        self.assertTrue(all('clip' not in c for c in bundle['candidates']))
+        self.assertEqual(list(path.parent.iterdir()), [path])
+        source = self.root/'audio/site/recording.wav'
+        source.parent.mkdir(parents=True)
+        with wave.open(str(source), 'wb') as wav:
+            wav.setparams((1, 2, 8000, 0, 'NONE', 'not compressed'))
+            wav.writeframes(b'\0\0' * 32000)
+        settings = Settings(local_dir=self.root/'store', audio_roots={'grillos': self.root/'audio'})
         repository = SQLiteRepository(settings.local_dir)
         repository.initialize()
         self.assertTrue(AnnotationService(repository,settings).import_bundle(path)['imported'])
@@ -70,7 +75,12 @@ class ExportTests(unittest.TestCase):
 
     def test_failed_export_does_not_publish_bundle(self):
         with self.assertRaises(ValueError):
-            self.export(audio_loader=lambda *_:np.zeros(4000))
+            self.export(db=SimpleNamespace(**{
+                'get_embedding': FakeSource().get_embedding,
+                'get_window': FakeSource().get_window,
+                'get_recording': FakeSource().get_recording,
+                'get_deployment': lambda _: None,
+            }))
         self.assertFalse((self.root/'bundle').exists())
         self.assertFalse(list(self.root.glob('export-*')))
 
